@@ -1,0 +1,10 @@
+[Unit]
+Description=Validate and recover Palladium services after boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/john/projects/service-boot-validator.workspace/service-boot-validator
+ExecStart=/usr/bin/python3 /home/john/projects/service-boot-validator.workspace/service-boot-validator/boot_validator.py
+TimeoutStartSec=300

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Palladium service validation after every boot
+
+[Timer]
+OnBootSec=45s
+AccuracySec=5s
+Unit=service-boot-validator.service
+
+[Install]
+WantedBy=timers.target
