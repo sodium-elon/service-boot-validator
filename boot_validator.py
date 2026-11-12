@@ -27,7 +27,6 @@ USER_SERVICES = [
     "subscription-llm.service",
     "subscription-llm-images.service",
     "postgrest.service",
-    "garmin-mcp.service",
     "fli-mcp.service",
     "alpharunner.service",
     "iptvchannels.service",
@@ -58,7 +57,6 @@ class Probe:
 PROBES = [
     Probe("PostgreSQL", "palladium.service", port=5432),
     Probe("Valkey", "valkey.service", port=6379),
-    Probe("Garmin MCP", "garmin-mcp.service", url="http://127.0.0.1:3030/mcp"),
     Probe("Saveatrip", "saveatrip.service", url="http://127.0.0.1:3040/"),
     Probe("AlphaRunner", "alpharunner.service", url="http://127.0.0.1:3050/"),
     Probe("IPTV Channels", "iptvchannels.service", url="http://127.0.0.1:3100/"),
@@ -254,12 +252,21 @@ def validate_services(*, repair: bool, include_public: bool) -> int:
     if not caddy:
         failures.append("service:caddy.service")
 
-    # Regenerate the STRM library after PostgreSQL and PostgREST are healthy.
+    # Active units can still return 503 while their databases/schema cache warm up.
     if repair and runner.run("is-active", "palladium.service")[0] == 0 and runner.run("is-active", "postgrest.service")[0] == 0:
-        runner.run("reset-failed", "strm-bridge.service")
-        code, output = runner.run("start", "strm-bridge.service")
-        print(f"{'PASS' if code == 0 else 'FAIL'} oneshot strm-bridge.service" + (f" ({output})" if code and output else ""))
-        if code != 0:
+        dependencies = {"palladium.service", "postgrest.service"}
+        dependency_probes = [probe for probe in PROBES if probe.service in dependencies and not probe.public]
+        ready = {probe.service for probe in dependency_probes} == dependencies and all(
+            _retry_probe(probe)[0] for probe in dependency_probes
+        )
+        if ready:
+            runner.run("reset-failed", "strm-bridge.service")
+            code, output = runner.run("start", "strm-bridge.service")
+            print(f"{'PASS' if code == 0 else 'FAIL'} oneshot strm-bridge.service" + (f" ({output})" if code and output else ""))
+            if code != 0:
+                failures.append("oneshot:strm-bridge.service")
+        else:
+            print("FAIL oneshot strm-bridge.service (dependency readiness failed; not started)")
             failures.append("oneshot:strm-bridge.service")
 
     for probe in PROBES:
