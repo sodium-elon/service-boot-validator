@@ -128,3 +128,85 @@ def test_ensure_user_service_starts_an_inactive_unit() -> None:
     assert result is True
     assert ("reset-failed", "demo.service") in runner.commands
     assert ("start", "demo.service") in runner.commands
+
+
+def test_check_only_does_not_require_retired_garmin_mcp(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    commands = []
+
+    class Runner:
+        def run(self, *args):
+            commands.append(args)
+            return (4, "not-found") if "garmin-mcp.service" in args else (0, "active")
+
+    monkeypatch.setattr(boot_validator, "UserSystemctl", Runner)
+    monkeypatch.setattr(boot_validator.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        boot_validator, "_retry_probe",
+        lambda probe: (probe.service != "garmin-mcp.service", "fixture"),
+    )
+
+    assert boot_validator.validate_services(repair=False, include_public=False) == 0
+    assert all("garmin-mcp.service" not in command for command in commands)
+    assert all(command[0] == "is-active" for command in commands)
+
+
+def _mock_validation_io(monkeypatch, postgrest_statuses):
+    from types import SimpleNamespace
+
+    events = []
+    statuses = iter(postgrest_statuses)
+    last_status = postgrest_statuses[-1]
+
+    class Runner:
+        def run(self, *args):
+            events.append(args)
+            return 0, "active"
+
+    def http_status(url):
+        nonlocal last_status
+        if url == "http://127.0.0.1:3110/":
+            last_status = next(statuses, last_status)
+            events.append(("postgrest", last_status))
+            return last_status
+        return 200
+
+    monkeypatch.setattr(boot_validator, "UserSystemctl", Runner)
+    monkeypatch.setattr(boot_validator.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(boot_validator, "tcp_open", lambda *a, **kw: True)
+    monkeypatch.setattr(boot_validator, "http_status", http_status)
+    monkeypatch.setattr(boot_validator, "quarantine_stale_postgres_artifacts", lambda **kw: [])
+    monkeypatch.setattr(boot_validator.time, "sleep", lambda seconds: None)
+    return events
+
+
+def test_strm_waits_for_postgrest_readiness_before_generation(monkeypatch) -> None:
+    events = _mock_validation_io(monkeypatch, [503, 200])
+
+    assert boot_validator.validate_services(repair=True, include_public=False) == 0
+    assert events.index(("postgrest", 200)) < events.index(("start", "strm-bridge.service"))
+    assert events.index(("postgrest", 503)) < events.index(("postgrest", 200))
+
+
+@pytest.mark.parametrize("failure", ["postgrest", "postgres", "missing-probe"])
+def test_strm_is_not_started_when_dependency_readiness_fails(monkeypatch, failure) -> None:
+    events = _mock_validation_io(monkeypatch, [503] if failure == "postgrest" else [200])
+    if failure == "postgres":
+        monkeypatch.setattr(boot_validator, "tcp_open", lambda *a, **kw: False)
+    if failure == "missing-probe":
+        monkeypatch.setattr(
+            boot_validator, "PROBES",
+            [probe for probe in boot_validator.PROBES if probe.service != "postgrest.service"],
+        )
+
+    assert boot_validator.validate_services(repair=True, include_public=False) == 1
+    assert ("start", "strm-bridge.service") not in events
+    assert ("reset-failed", "strm-bridge.service") not in events
+
+
+def test_check_only_never_generates_strm_or_controls_services(monkeypatch) -> None:
+    events = _mock_validation_io(monkeypatch, [200])
+
+    assert boot_validator.validate_services(repair=False, include_public=False) == 0
+    assert all(event[0] in {"is-active", "postgrest"} for event in events)
